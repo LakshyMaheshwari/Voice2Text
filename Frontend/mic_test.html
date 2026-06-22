@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Microphone Test</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin-top: 50px; background: #111; color: #fff; }
+        #bar { width: 0%; height: 50px; background: lime; transition: width 0.1s; margin: 20px auto; max-width: 80%; }
+        button { padding: 15px 30px; font-size: 18px; cursor: pointer; }
+        #log { margin-top: 20px; color: #aaa; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <h2>Microphone Pure Hardware Test</h2>
+    <p>This bypasses all app logic and tests raw hardware access.</p>
+    
+    <div style="margin-bottom: 20px;">
+        <select id="mic-select" style="padding: 10px; font-size: 16px; min-width: 300px; display: none;"></select>
+        <button id="start-btn" onclick="startSelectedMic()" style="padding: 10px 20px; font-size: 16px; display: none;">Test Selected Mic</button>
+    </div>
+
+    <button id="init-btn" onclick="initTest()">Step 1: Grant Permissions & Find Mics</button>
+    
+    <div style="width: 80%; height: 50px; border: 1px solid #555; margin: 20px auto;">
+        <div id="bar"></div>
+    </div>
+    <div id="status" style="font-size: 20px; font-weight: bold;">Waiting to start...</div>
+    <div id="log"></div>
+
+    <script>
+        let currentStream = null;
+        let audioCtx = null;
+        let rafId = null;
+
+        const log = (m) => {
+            const l = document.getElementById('log');
+            l.innerHTML += m + '<br>';
+            l.scrollTop = l.scrollHeight;
+        };
+
+        async function initTest() {
+            try {
+                log('Requesting initial permission to read device list...');
+                // Must get initial stream to unlock device labels
+                let initialStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                initialStream.getTracks().forEach(t => t.stop());
+
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const audioInputDevices = devices.filter(d => d.kind === 'audioinput');
+                
+                log(`Found ${audioInputDevices.length} microphones!`);
+                
+                const select = document.getElementById('mic-select');
+                select.innerHTML = '';
+                
+                audioInputDevices.forEach((device, index) => {
+                    const option = document.createElement('option');
+                    option.value = device.deviceId;
+                    option.text = device.label || `Microphone ${index + 1}`;
+                    select.appendChild(option);
+                });
+
+                select.style.display = 'inline-block';
+                document.getElementById('start-btn').style.display = 'inline-block';
+                document.getElementById('init-btn').style.display = 'none';
+
+                log('Please select a microphone from the dropdown and click Test.');
+            } catch(e) {
+                log('<span style="color:red">ERROR: ' + e.message + '</span>');
+            }
+        }
+
+        async function startSelectedMic() {
+            if (currentStream) {
+                currentStream.getTracks().forEach(t => t.stop());
+            }
+            if (audioCtx) {
+                audioCtx.close();
+            }
+            if (rafId) {
+                cancelAnimationFrame(rafId);
+            }
+
+            const deviceId = document.getElementById('mic-select').value;
+            const deviceName = document.getElementById('mic-select').options[document.getElementById('mic-select').selectedIndex].text;
+
+            try {
+                log(`<br>--- Testing: ${deviceName} ---`);
+                currentStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { deviceId: deviceId ? { exact: deviceId } : undefined } 
+                });
+                
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
+                }
+                const src = audioCtx.createMediaStreamSource(currentStream);
+                const analyser = audioCtx.createAnalyser();
+                analyser.fftSize = 256;
+                src.connect(analyser);
+                
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                
+                function checkVol() {
+                    analyser.getByteTimeDomainData(dataArray);
+                    let max = 0;
+                    for(let i=0; i<dataArray.length; i++){
+                        let val = Math.abs(dataArray[i] - 128);
+                        if(val > max) max = val;
+                    }
+                    
+                    let pct = (max / 128) * 100;
+                    document.getElementById('bar').style.width = pct + '%';
+                    document.getElementById('status').innerText = 'Volume Peak: ' + pct.toFixed(1) + '%';
+                    
+                    if (pct > 2) {
+                        document.getElementById('status').style.color = 'lime';
+                        document.getElementById('bar').style.background = 'lime';
+                    } else {
+                        document.getElementById('status').style.color = 'white';
+                        document.getElementById('bar').style.background = 'red';
+                    }
+                    
+                    rafId = requestAnimationFrame(checkVol);
+                }
+                checkVol();
+                log('Listening... Speak now!');
+            } catch(e) {
+                log('<span style="color:red">ERROR: ' + e.message + '</span>');
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceToText – Live Transcription</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --bg: #0a0b0f; --surface: #13151c; --surface2: #1c1f2b;
+            --border: rgba(255,255,255,0.08); --accent: #6c63ff; --accent2: #a78bfa;
+            --green: #22c55e; --red: #ef4444; --orange: #f97316;
+            --text: #e2e8f0; --text2: #94a3b8; --text3: #475569;
+        }
+        body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+        /* ── HEADER ── */
+        header { padding: 16px 28px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; background: rgba(19,21,28,0.95); backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 100; }
+        .logo { width: 30px; height: 30px; background: linear-gradient(135deg, var(--accent), var(--accent2)); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 15px; }
+        header h1 { font-size: 17px; font-weight: 600; }
+        header h1 span { color: var(--accent2); }
+        #conn-status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); background: var(--surface); padding: 5px 12px; border-radius: 20px; border: 1px solid var(--border); }
+        .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); display: inline-block; transition: background 0.3s; }
+        .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .dot.red { background: var(--red); animation: blink 1s infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        /* ── PAGE SYSTEM ── */
+        .page { display: none; }
+        #page-login { align-items: center; justify-content: center; min-height: calc(100vh - 63px); padding: 40px 20px; }
+        #page-login.active { display: flex; }
+        #page-meeting { max-width: 820px; margin: 0 auto; padding: 28px 20px; flex-direction: column; gap: 20px; }
+        #page-meeting.active { display: flex; }
+
+        /* ── CARDS & FORMS ── */
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 36px; width: 100%; max-width: 400px; }
+        .card h2 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+        .card p { color: var(--text2); font-size: 13px; margin-bottom: 24px; }
+        .form-group { margin-bottom: 14px; }
+        label { display: block; font-size: 12px; font-weight: 500; color: var(--text2); margin-bottom: 5px; }
+        input { width: 100%; padding: 11px 14px; background: var(--surface2); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-size: 14px; font-family: inherit; outline: none; transition: border-color 0.2s; }
+        input:focus { border-color: var(--accent); }
+        .btn { display: inline-flex; align-items: center; justify-content: center; padding: 11px 18px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: none; border-radius: 9px; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; font-family: inherit; }
+        .btn:hover { opacity: 0.88; }
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .btn-block { width: 100%; }
+        .btn-danger { background: linear-gradient(135deg, var(--red), var(--orange)); }
+        .btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text2); }
+        .btn-ghost:hover { border-color: var(--accent2); color: var(--accent2); }
+        .btn-sm { padding: 7px 14px; font-size: 12px; }
+        .alert { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 14px; display: none; }
+        .alert-err { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); color: #fca5a5; }
+        .switch { text-align: center; margin-top: 18px; font-size: 13px; color: var(--text2); }
+        .switch a { color: var(--accent2); cursor: pointer; }
+
+        /* ── MEETING PAGE ── */
+        .top-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+        .top-bar h2 { font-size: 20px; font-weight: 700; }
+        .create-row { display: flex; gap: 10px; }
+        .create-row input { flex: 1; }
+
+        /* ── RECORDER ── */
+        .rec-card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 28px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+        #rec-btn { width: 76px; height: 76px; border-radius: 50%; border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-size: 28px; cursor: pointer; box-shadow: 0 4px 20px rgba(108,99,255,.4); transition: transform .2s; }
+        #rec-btn:hover { transform: scale(1.06); }
+        #rec-btn.recording { background: linear-gradient(135deg, var(--red), var(--orange)); box-shadow: 0 4px 24px rgba(239,68,68,.5); animation: pulse 1.8s infinite; }
+        #rec-btn:disabled { opacity: .35; cursor: not-allowed; animation: none; }
+        @keyframes pulse { 0%,100%{box-shadow:0 4px 24px rgba(239,68,68,.4)} 50%{box-shadow:0 4px 48px rgba(239,68,68,.9)} }
+        #rec-label { font-size: 14px; color: var(--text2); font-weight: 500; text-align: center; }
+
+        /* Waveform */
+        #waveform { display: flex; align-items: center; gap: 3px; height: 30px; opacity: 0; transition: opacity .3s; }
+        #waveform.on { opacity: 1; }
+        .bar { width: 3px; border-radius: 2px; background: linear-gradient(to top, var(--accent), var(--accent2)); animation: wave 1.2s ease-in-out infinite; }
+        .bar:nth-child(1){height:6px;animation-delay:0s} .bar:nth-child(2){height:16px;animation-delay:.1s} .bar:nth-child(3){height:26px;animation-delay:.2s} .bar:nth-child(4){height:12px;animation-delay:.3s} .bar:nth-child(5){height:20px;animation-delay:.4s} .bar:nth-child(6){height:8px;animation-delay:.5s} .bar:nth-child(7){height:24px;animation-delay:.6s} .bar:nth-child(8){height:14px;animation-delay:.7s} .bar:nth-child(9){height:18px;animation-delay:.8s} .bar:nth-child(10){height:10px;animation-delay:.9s}
+        @keyframes wave { 0%,100%{transform:scaleY(.25)} 50%{transform:scaleY(1)} }
+
+        /* Stats */
+        .stats { display: flex; gap: 28px; }
+        .stat { text-align: center; }
+        .stat-val { font-size: 20px; font-weight: 700; color: var(--accent2); }
+        .stat-lbl { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: .4px; margin-top: 2px; }
+
+        /* ── DEBUG PANEL ── */
+        #debug-panel { background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 12px 16px; font-family: monospace; font-size: 12px; color: #7ee787; max-height: 100px; overflow-y: auto; display: none; }
+        #debug-panel.visible { display: block; }
+        .debug-line { opacity: 0.85; line-height: 1.5; }
+        .debug-line.warn { color: #f0883e; }
+        .debug-line.err { color: #f85149; }
+
+        /* ── TRANSCRIPT ── */
+        .tc-card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; overflow: hidden; }
+        .tc-header { padding: 14px 22px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+        .tc-header h3 { font-size: 14px; font-weight: 600; }
+        #transcript-box { padding: 18px 22px; min-height: 180px; max-height: 340px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+        #transcript-box::-webkit-scrollbar { width: 3px; }
+        #transcript-box::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+        .empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: var(--text3); font-size: 13px; padding: 40px 0; }
+        .seg { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; animation: fadeUp .3s ease; }
+        .seg.interim { border-style: dashed; opacity: .65; }
+        @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+        .seg-spk { font-size: 11px; font-weight: 600; color: var(--accent2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+        .seg-txt { font-size: 15px; line-height: 1.5; }
+        .seg-time { font-size: 11px; color: var(--text3); margin-top: 5px; }
+        .sys-msg { text-align: center; font-size: 12px; color: var(--text3); padding: 6px; font-style: italic; }
+
+        /* ── SUMMARY ── */
+        #summary-card { background: var(--surface); border: 1px solid rgba(167,139,250,.3); border-radius: 18px; padding: 22px 26px; display: none; }
+        #summary-card.visible { display: block; }
+        #summary-card h3 { font-size: 15px; font-weight: 600; color: var(--accent2); margin-bottom: 14px; }
+        .summary-box { background: var(--surface2); padding: 16px; border-radius: 10px; margin-bottom: 16px; border: 1px solid var(--border); }
+        .summary-box.ai { border-color: rgba(34, 197, 94, 0.4); background: rgba(34, 197, 94, 0.05); }
+        .summary-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text3); margin-bottom: 8px; }
+        .summary-title.ai { color: var(--green); }
+        #summary-ai { font-size: 14px; line-height: 1.6; color: var(--text); white-space: pre-wrap; }
+        #summary-fulltext { font-size: 14px; line-height: 1.7; color: var(--text2); white-space: pre-wrap; }
+        .summary-meta { margin-top: 14px; font-size: 12px; color: var(--text3); }
+
+        /* Status bar */
+        #mtg-bar { font-size: 13px; color: var(--text2); display: none; padding: 10px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+
+        /* End btn */
+        #end-btn { display: none; margin-top: 4px; }
+        #end-btn.visible { display: inline-flex; }
+
+        /* User actions */
+        .top-actions { display: flex; align-items: center; gap: 10px; }
+        #user-lbl { font-size: 13px; color: var(--text2); }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="logo">🎙</div>
+    <h1>Voice<span>ToText</span></h1>
+    <div id="conn-status">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-lbl">Disconnected</span>
+    </div>
+</header>
+
+<!-- LOGIN PAGE -->
+<div id="page-login" class="page">
+    <div class="card">
+        <h2 id="auth-h">Welcome back</h2>
+        <p id="auth-sub">Sign in to transcribe your meetings.</p>
+        <div class="alert alert-err" id="auth-err"></div>
+        <div class="form-group" id="name-row" style="display:none">
+            <label>Name</label>
+            <input id="inp-name" placeholder="Your name" autocomplete="name">
+        </div>
+        <div class="form-group">
+            <label>Email</label>
+            <input id="inp-email" type="email" placeholder="you@example.com" autocomplete="email">
+        </div>
+        <div class="form-group">
+            <label>Password</label>
+            <input id="inp-pwd" type="password" placeholder="••••••••" autocomplete="current-password">
+        </div>
+        <button class="btn btn-block" id="auth-btn" onclick="doAuth()">Sign In</button>
+        <div class="switch">
+            <span id="sw-txt">No account?</span>
+            <a onclick="toggleMode()" id="sw-lnk"> Create one</a>
+        </div>
+    </div>
+</div>
+
+<!-- MEETING PAGE -->
+<div id="page-meeting" class="page">
+    <div class="top-bar">
+        <h2>Live Transcription</h2>
+        <div class="top-actions">
+            <span id="user-lbl"></span>
+            <button class="btn btn-ghost btn-sm" onclick="doLogout()">Sign out</button>
+        </div>
+    </div>
+
+    <!-- Step 1: Create meeting -->
+    <div class="create-row">
+        <input id="mtg-title" placeholder="Meeting title (e.g. Team Standup)" autocomplete="off">
+        <button class="btn" id="new-mtg-btn" onclick="createMeeting()">+ New Meeting</button>
+    </div>
+
+    <!-- Meeting status bar -->
+    <div id="mtg-bar"></div>
+
+    <!-- Step 2: Record -->
+    <div class="rec-card">
+        <div id="waveform">
+            <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+            <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+            <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+            <div class="bar"></div>
+        </div>
+
+        <div class="file-actions">
+            <button id="rec-btn" onclick="toggleRec()" disabled>🎙</button>
+            <input type="file" id="audio-upload" accept="audio/*" style="display: none;">
+            <button class="btn btn-ghost" id="upload-btn" onclick="document.getElementById('audio-upload').click()" disabled>📂 Upload</button>
+        </div>
+        <div id="rec-label">Create a meeting first to start recording</div>
+
+        <div class="stats">
+            <div class="stat"><div class="stat-val" id="s-dur">0:00</div><div class="stat-lbl">Duration</div></div>
+            <div class="stat"><div class="stat-val" id="s-amp">0.00</div><div class="stat-lbl">Amplitude</div></div>
+            <div class="stat"><div class="stat-val" id="s-segs">0</div><div class="stat-lbl">Segments</div></div>
+        </div>
+
+        <button class="btn btn-danger" id="end-btn" onclick="endMeeting()">⏹ End & Save Meeting</button>
+    </div>
+
+    <!-- Debug panel (toggle with D key) -->
+    <div id="debug-panel"></div>
+
+    <!-- Step 3: Live Transcript -->
+    <div class="tc-card">
+        <div class="tc-header">
+            <h3>📝 Live Transcript</h3>
+            <button class="btn btn-ghost btn-sm" onclick="clearTx()">Clear</button>
+        </div>
+        <div id="transcript-box">
+            <div class="empty">
+                <div style="font-size:28px">💬</div>
+                <div>Transcript appears here as you speak</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Summary (shown after ending meeting) -->
+    <div id="summary-card">
+        <h3>📋 Meeting Saved</h3>
+        
+        <div class="summary-box ai">
+            <div class="summary-title ai">✨ AI Summary</div>
+            <div id="summary-ai">Loading summary...</div>
+        </div>
+
+        <div class="summary-box">
+            <div class="summary-title">Full Transcript</div>
+            <div id="summary-fulltext"></div>
+        </div>
+
+        <div class="summary-meta" id="summary-meta"></div>
+    </div>
+</div>
+
+<script src="http://localhost:5000/socket.io/socket.io.js"></script>
+<script>
+// ── Constants ────────────────────────────────────────────────────────────────
+const API = 'http://localhost:5000/api'
+const TARGET_SAMPLE_RATE = 16000 // Whisper requires 16 kHz
+
+// ── State ────────────────────────────────────────────────────────────────────
+let mode = 'login'
+let token = localStorage.getItem('vtt_token')
+let user = null, meetingId = null, socket = null
+let recording = false, audioCtx = null, processor = null, stream = null
+let segs = 0, recStart = null, timer = null, maxAmp = 0
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(s) {
+    const m = Math.floor(s / 60), ss = Math.floor(s % 60)
+    return `${m}:${ss.toString().padStart(2, '0')}`
+}
+
+function setPage(id) {
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'))
+    document.getElementById(id).classList.add('active')
+}
+
+function setConn(ok, recording = false) {
+    document.getElementById('conn-dot').className = 'dot' + (ok ? (recording ? ' red' : ' green') : '')
+    document.getElementById('conn-lbl').textContent = ok ? (recording ? 'Recording' : 'Connected') : 'Disconnected'
+}
+
+function dbg(msg, level = 'info') {
+    console.log('[VTT]', msg)
+    const panel = document.getElementById('debug-panel')
+    const line = document.createElement('div')
+    line.className = 'debug-line' + (level === 'warn' ? ' warn' : level === 'err' ? ' err' : '')
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`
+    panel.appendChild(line)
+    panel.scrollTop = panel.scrollHeight
+}
+
+// ── Audio downsampler ────────────────────────────────────────
+function downsample(float32Buffer, fromRate, toRate) {
+    if (fromRate === toRate) return float32Buffer
+    const ratio = fromRate / toRate
+    const newLen = Math.round(float32Buffer.length / ratio)
+    const result = new Float32Array(newLen)
+    for (let i = 0; i < newLen; i++) {
+        const start = Math.floor(i * ratio)
+        const end = Math.min(Math.floor((i + 1) * ratio), float32Buffer.length)
+        let sum = 0
+        for (let j = start; j < end; j++) sum += float32Buffer[j]
+        result[i] = (end - start) > 0 ? sum / (end - start) : 0
+    }
+    return result
+}
+
+// ── File Upload Logic ────────────────────────────────────────
+document.getElementById('audio-upload').addEventListener('change', async (e) => {
+    const file = e.target.files[0]
+    if (!file || !meetingId || !socket?.connected) {
+        alert('Please create a meeting first before uploading.')
+        return
+    }
+
+    recording = true
+    document.getElementById('rec-btn').disabled = true
+    document.getElementById('upload-btn').disabled = true
+    document.getElementById('rec-label').textContent = '📂 Processing File...'
+    
+    try {
+        const arrayBuffer = await file.arrayBuffer()
+        const tempCtx = new (window.AudioContext || window.webkitAudioContext)()
+        const audioBuffer = await tempCtx.decodeAudioData(arrayBuffer)
+        const float32 = audioBuffer.getChannelData(0)
+        const downsampled = downsample(float32, audioBuffer.sampleRate, TARGET_SAMPLE_RATE)
+        
+        const int16 = new Int16Array(downsampled.length)
+        for (let i = 0; i < downsampled.length; i++) {
+            int16[i] = Math.max(-32768, Math.min(32767, downsampled[i] * 32768))
+        }
+
+        document.getElementById('rec-label').textContent = `📂 Sending ${(file.size / 1024).toFixed(0)}KB — please wait...`
+
+        const CHUNK_SIZE = 4096
+        let offset = 0
+
+        function sendNextChunk() {
+            if (offset >= int16.length) {
+                // ✅ FIX: All chunks sent — now tell server to end the meeting
+                document.getElementById('rec-label').textContent = '⏳ Transcribing... generating summary...'
+                // Wait 2s to let Whisper finish processing the last buffer before flushing
+                setTimeout(() => {
+                    socket.emit('end-recording')
+                    recording = false
+                    document.getElementById('rec-btn').disabled = false
+                    document.getElementById('upload-btn').disabled = false
+                }, 2000)
+                return
+            }
+            const chunk = int16.slice(offset, Math.min(offset + CHUNK_SIZE, int16.length))
+            socket.emit('audio-chunk', chunk.buffer)
+            offset += CHUNK_SIZE
+            setTimeout(sendNextChunk, 10) 
+        }
+        sendNextChunk()
+    } catch (e) {
+        dbg(`File error: ${e.message}`, 'err')
+        recording = false
+        document.getElementById('rec-btn').disabled = false
+        document.getElementById('upload-btn').disabled = false
+        document.getElementById('rec-label').textContent = '❌ Error processing file: ' + e.message
+    }
+})
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+function toggleMode() {
+    mode = mode === 'login' ? 'register' : 'login'
+    const l = mode === 'login'
+    document.getElementById('auth-h').textContent = l ? 'Welcome back' : 'Create account'
+    document.getElementById('auth-sub').textContent = l ? 'Sign in to transcribe your meetings.' : 'Start transcribing for free.'
+    document.getElementById('auth-btn').textContent = l ? 'Sign In' : 'Create Account'
+    document.getElementById('sw-txt').textContent = l ? 'No account?' : 'Already registered?'
+    document.getElementById('sw-lnk').textContent = l ? ' Create one' : ' Sign in'
+    document.getElementById('name-row').style.display = l ? 'none' : ''
+    hideErr()
+}
+
+function showErr(msg) { const e = document.getElementById('auth-err'); e.textContent = msg; e.style.display = 'block' }
+function hideErr() { document.getElementById('auth-err').style.display = 'none' }
+
+async function doAuth() {
+    const email = document.getElementById('inp-email').value.trim()
+    const pwd = document.getElementById('inp-pwd').value
+    const name = document.getElementById('inp-name').value.trim()
+    if (!email || !pwd) return showErr('Email and password are required.')
+    if (mode === 'register' && !name) return showErr('Name is required.')
+
+    const btn = document.getElementById('auth-btn')
+    btn.disabled = true; btn.textContent = '...'
+    hideErr()
+    try {
+        const url = `${API}/auth/${mode === 'login' ? 'login' : 'register'}`
+        const body = mode === 'login' ? { email, password: pwd } : { name, email, password: pwd }
+        const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'include', body: JSON.stringify(body) })
+        const d = await r.json()
+        if (!r.ok) throw new Error(d.message || 'Authentication failed')
+        token = d.token
+        localStorage.setItem('vtt_token', token)
+        user = d.user
+        enterApp()
+    } catch (e) { showErr(e.message) }
+    finally { btn.disabled = false; btn.textContent = mode === 'login' ? 'Sign In' : 'Create Account' }
+}
+
+async function enterApp() {
+    if (!token) { setPage('page-login'); return }
+    try {
+        const r = await fetch(`${API}/auth/me`, { headers: { 'Authorization': `Bearer ${token}` } })
+        if (!r.ok) throw new Error()
+        user = (await r.json()).user
+    } catch {
+        localStorage.removeItem('vtt_token'); token = null
+        setPage('page-login'); return
+    }
+    document.getElementById('user-lbl').textContent = user?.name || user?.email || ''
+    setPage('page-meeting')
+    connectSocket()
+}
+
+function doLogout() {
+    localStorage.removeItem('vtt_token'); token = null
+    if (socket) { socket.disconnect(); socket = null }
+    stopRec()
+    setPage('page-login')
+    setConn(false)
+}
+
+// ── Socket.IO ─────────────────────────────────────────────────────────────────
+function connectSocket() {
+    if (socket) socket.disconnect()
+    socket = io('http://localhost:5000', { auth: { token }, reconnection: true })
+
+    socket.on('connect', () => {
+        setConn(true)
+        dbg(`Socket connected: ${socket.id}`)
+        if (meetingId) socket.emit('join-meeting', meetingId)
+    })
+    socket.on('disconnect', () => { setConn(false); dbg('Socket disconnected', 'warn') })
+    socket.on('connect_error', e => { dbg(`Socket error: ${e.message}`, 'err') })
+
+    socket.on('joined-meeting', () => {
+        dbg(`Joined meeting room: ${meetingId}`)
+        document.getElementById('rec-btn').disabled = false
+        document.getElementById('upload-btn').disabled = false
+        document.getElementById('rec-label').textContent = 'Press 🎙 to start recording or upload a file'
+    })
+
+    socket.on('transcription', d => {
+        dbg(`Transcription: "${d.text}" isFinal=${d.isFinal}`)
+        addSeg(d.speaker, d.text, d.start, d.end, d.isFinal)
+    })
+
+    socket.on('recording-ended', () => {
+        dbg('Recording ended, processing...')
+        document.getElementById('rec-label').textContent = '⏳ Saving transcript...'
+    })
+
+    socket.on('summary-ready', d => {
+        dbg(`Summary ready. Transcript ID: ${d.transcriptId}`)
+        document.getElementById('rec-label').textContent = '✅ Meeting saved!'
+        document.getElementById('end-btn').classList.remove('visible')
+        showSummary(d)
+        addSysMsg(`✅ Transcript saved (${d.segments?.length || 0} segments)`)
+    })
+
+    socket.on('error', e => { dbg(`Server error: ${e.message}`, 'err'); addSysMsg(`❌ ${e.message}`) })
+}
+
+// ── Meeting ───────────────────────────────────────────────────────────────────
+async function createMeeting() {
+    const title = document.getElementById('mtg-title').value.trim() || 'Untitled Meeting'
+    const btn = document.getElementById('new-mtg-btn')
+    btn.disabled = true; btn.textContent = 'Creating...'
+    try {
+        const r = await fetch(`${API}/meetings`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ title })
+        })
+        const d = await r.json()
+        if (!r.ok) throw new Error(d.message || 'Failed to create meeting')
+
+        meetingId = d.meeting?._id || d._id
+        dbg(`Meeting created: ${meetingId}`)
+        document.getElementById('mtg-title').value = ''
+        clearTx(); segs = 0; recStart = null
+        document.getElementById('summary-card').style.display = 'none'
+        document.getElementById('mtg-bar').textContent = `Active Meeting: ${title}`
+        document.getElementById('mtg-bar').style.display = 'block'
+        document.getElementById('end-btn').classList.remove('visible')
+        document.getElementById('rec-btn').disabled = true
+        document.getElementById('upload-btn').disabled = true
+        document.getElementById('rec-label').textContent = 'Joining meeting room...'
+
+        if (socket?.connected) socket.emit('join-meeting', meetingId)
+    } catch (e) { alert('Error: ' + e.message); dbg(e.message, 'err') }
+    finally { btn.disabled = false; btn.textContent = '+ New Meeting' }
+}
+
+// ── Recording ─────────────────────────────────────
+async function toggleRec() {
+    if (recording) stopRec()
+    else await startRec()
+}
+
+async function startRec() {
+    if (!meetingId) return alert('Please create a meeting first!')
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({
+            audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+        })
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+        if (audioCtx.state === 'suspended') await audioCtx.resume()
+        const nativeRate = audioCtx.sampleRate
+        const src = audioCtx.createMediaStreamSource(stream)
+        processor = audioCtx.createScriptProcessor(4096, 1, 1)
+
+        processor.onaudioprocess = e => {
+            if (!recording || !socket?.connected) return
+            const float32 = e.inputBuffer.getChannelData(0)
+            const downsampled = downsample(float32, nativeRate, TARGET_SAMPLE_RATE)
+            let peak = 0
+            for (let i = 0; i < downsampled.length; i++) {
+                const abs = Math.abs(downsampled[i])
+                if (abs > peak) peak = abs
+            }
+            maxAmp = peak
+            document.getElementById('s-amp').textContent = peak.toFixed(3)
+            const int16 = new Int16Array(downsampled.length)
+            for (let i = 0; i < downsampled.length; i++) {
+                int16[i] = Math.max(-32768, Math.min(32767, downsampled[i] * 32768))
+            }
+            socket.emit('audio-chunk', int16.buffer)
+        }
+        src.connect(processor)
+        processor.connect(audioCtx.destination)
+        recording = true
+        recStart = Date.now()
+        timer = setInterval(() => {
+            const elapsed = Math.floor((Date.now() - recStart) / 1000)
+            document.getElementById('s-dur').textContent = fmt(elapsed)
+        }, 1000)
+        document.getElementById('rec-btn').classList.add('recording')
+        document.getElementById('rec-btn').textContent = '⏸'
+        document.getElementById('rec-label').textContent = '🔴 Recording — speak now!'
+        document.getElementById('waveform').classList.add('on')
+        document.getElementById('end-btn').classList.add('visible')
+        setConn(true, true)
+    } catch (e) {
+        alert('Microphone error: ' + e.message)
+    }
+}
+
+function stopRec() {
+    if (!recording) return
+    recording = false
+    if (processor) { processor.disconnect(); processor = null }
+    if (audioCtx) { audioCtx.close(); audioCtx = null }
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null }
+    if (timer) { clearInterval(timer); timer = null }
+    document.getElementById('rec-btn').classList.remove('recording')
+    document.getElementById('rec-btn').textContent = '🎙'
+    document.getElementById('waveform').classList.remove('on')
+    document.getElementById('rec-btn').disabled = false
+    document.getElementById('upload-btn').disabled = false
+    setConn(socket?.connected || false)
+}
+
+function endMeeting() {
+    stopRec()
+    if (socket?.connected && meetingId) {
+        socket.emit('end-recording')
+        document.getElementById('rec-label').textContent = '⏳ Saving transcript...'
+    }
+}
+
+// ── Transcript UI ─────────────────────────────────────────────────────────────
+function clearTx() {
+    document.getElementById('transcript-box').innerHTML = '<div class="empty"><div style="font-size:28px">💬</div><div>Transcript appears here as you speak</div></div>'
+    segs = 0
+    document.getElementById('s-segs').textContent = '0'
+}
+
+function addSeg(speaker, text, start, end, isFinal) {
+    const box = document.getElementById('transcript-box')
+    const empty = box.querySelector('.empty'); if (empty) empty.remove()
+    segs++
+    document.getElementById('s-segs').textContent = segs
+    const d = document.createElement('div')
+    d.className = 'seg' + (isFinal ? '' : ' interim')
+    d.innerHTML = `<div class="seg-spk">${speaker || 'Speaker'}</div><div class="seg-txt">${text}</div>${start != null ? `<div class="seg-time">${fmt(start)} → ${fmt(end)}</div>` : ''}`
+    box.appendChild(d)
+    box.scrollTop = box.scrollHeight
+}
+
+function addSysMsg(msg) {
+    const box = document.getElementById('transcript-box')
+    const d = document.createElement('div'); d.className = 'sys-msg'; d.textContent = msg
+    box.appendChild(d); box.scrollTop = box.scrollHeight
+}
+
+function showSummary(data) {
+    const card = document.getElementById('summary-card')
+    card.style.display = 'block'
+    document.getElementById('summary-fulltext').textContent = data.fullText || '(No speech detected)'
+    document.getElementById('summary-ai').textContent = data.summary || 'Summary unavailable.'
+    document.getElementById('summary-meta').textContent = `${data.segments?.length || 0} segment(s) | ID: ${data.transcriptId}`
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+    // Enter to submit login
+    if (e.key === 'Enter' && document.getElementById('page-login').classList.contains('active')) doAuth()
+    // D to toggle debug panel
+    if (e.key === 'd' && document.getElementById('page-meeting').classList.contains('active')) {
+        const p = document.getElementById('debug-panel')
+        p.classList.toggle('visible')
+    }
+})
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+if (token) enterApp(); else setPage('page-login')
+</script>
+</body>
+</html>

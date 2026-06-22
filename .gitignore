@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Environment variables
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Debug and audio files
+*.wav
+*.pcm
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
