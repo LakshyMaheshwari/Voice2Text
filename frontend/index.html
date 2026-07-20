@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice-to-Justice</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f4f4f9; padding: 40px; color: #333; }
+        .container { max-width: 560px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        h2 { color: #2c3e50; margin-bottom: 6px; }
+        p { color: #666; margin-bottom: 24px; font-size: 14px; }
+        .field { margin-bottom: 18px; }
+        label { display: block; font-weight: 600; margin-bottom: 6px; font-size: 14px; }
+        input[type=email], input[type=file] { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+        #btn { width: 100%; padding: 13px; background: #3498db; color: white; border: none; border-radius: 6px; font-size: 15px; font-weight: bold; cursor: pointer; margin-top: 4px; }
+        #btn:hover { background: #2980b9; }
+        #btn:disabled { background: #a5c9de; cursor: not-allowed; }
+        #log { margin-top: 20px; padding: 14px; background: #1a1a2e; color: #e0e0e0; font-family: Consolas, monospace; font-size: 13px; border-radius: 8px; white-space: pre-wrap; word-break: break-word; max-height: 380px; overflow-y: auto; display: none; }
+        .ok  { color: #51cf66; }
+        .err { color: #ff6b6b; }
+        .inf { color: #74c0fc; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h2>Voice-to-Justice</h2>
+    <p>Upload an audio file — it will be transcribed and a legal report emailed to you.</p>
+
+    <div class="field">
+        <label for="email">Email address</label>
+        <input type="email" id="email" placeholder="you@example.com">
+    </div>
+    <div class="field">
+        <label for="audio">Audio file (MP3, WAV, MPEG, M4A…)</label>
+        <input type="file" id="audio">
+    </div>
+
+    <button type="button" id="btn">Transcribe &amp; Send Report</button>
+    <div id="log"></div>
+</div>
+
+<script>
+const GATEWAY   = "https://vice-ice-broaden.ngrok-free.dev";
+const SKIP_HDR  = { "ngrok-skip-browser-warning": "1" };
+
+const logEl = document.getElementById("log");
+const btn   = document.getElementById("btn");
+
+function addLog(msg, cls) {
+    logEl.style.display = "block";
+    const line = document.createElement("div");
+    line.className = cls || "";
+    line.textContent = new Date().toLocaleTimeString() + "  " + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+function resetBtn() {
+    btn.disabled = false;
+    btn.textContent = "Transcribe & Send Report";
+}
+
+document.getElementById("btn").addEventListener("click", async function () {
+    const email = document.getElementById("email").value.trim();
+    const fileEl = document.getElementById("audio");
+    const file   = fileEl.files && fileEl.files[0];
+
+    if (!email || !file) { alert("Please fill in both fields."); return; }
+
+    logEl.innerHTML = "";
+    logEl.style.display = "block";
+    btn.disabled  = true;
+    btn.textContent = "Working…";
+
+    // ── Normalise MIME type ────────────────────────────────────────────────
+    const EXT_MIME = { mp3:"audio/mpeg", mpeg:"audio/mpeg", mpga:"audio/mpeg",
+                       wav:"audio/wav", m4a:"audio/mp4", webm:"audio/webm", ogg:"audio/ogg" };
+    const ext = file.name.split(".").pop().toLowerCase();
+    const upload = (EXT_MIME[ext] && file.type !== EXT_MIME[ext])
+        ? new File([file], file.name, { type: EXT_MIME[ext] })
+        : file;
+
+    addLog("File: " + file.name + " (" + (file.size/1024).toFixed(1) + " KB, " + (upload.type||"unknown type") + ")", "inf");
+
+    // ── STEP 1 — Transcribe ───────────────────────────────────────────────
+    try {
+        addLog("Step 1 — uploading to transcription server…", "inf");
+        const form = new FormData();
+        form.append("file", upload);
+
+        const r1 = await fetch(GATEWAY + "/transcribe", {
+            method: "POST",
+            headers: SKIP_HDR,
+            body: form
+        });
+
+        const raw1 = await r1.text();
+        addLog("Transcribe status: " + r1.status, r1.ok ? "inf" : "err");
+        addLog("Transcribe body:   " + raw1.slice(0, 500), "inf");
+
+        if (!r1.ok) { addLog("Transcription failed — stopping.", "err"); resetBtn(); return; }
+
+        let d1;
+        try { d1 = JSON.parse(raw1); }
+        catch (_) { addLog("Response is not JSON — ngrok warning page? Check that api_gateway.py is running.", "err"); resetBtn(); return; }
+
+        const transcript = d1.text || d1.transcript || "";
+        if (!transcript.trim()) { addLog("Server replied OK but transcript is empty.", "err"); resetBtn(); return; }
+
+        addLog("Transcript: " + transcript.slice(0, 200) + (transcript.length > 200 ? "…" : ""), "ok");
+
+        // ── STEP 2 — Send to Relay via gateway proxy ───────────────────────
+        addLog("Step 2 — sending to Relay webhook…", "inf");
+
+        const body2 = JSON.stringify({ email: email, transcript: transcript });
+        addLog("Payload sent: " + body2.slice(0, 300), "inf");
+
+        const r2 = await fetch(GATEWAY + "/relay-webhook", {
+            method: "POST",
+            headers: { ...SKIP_HDR, "Content-Type": "application/json" },
+            body: body2
+        });
+
+        const raw2 = await r2.text();
+        addLog("Relay status: " + r2.status, r2.ok ? "ok" : "err");
+        addLog("Relay body:   " + raw2.slice(0, 500), r2.ok ? "ok" : "err");
+
+        if (r2.ok) {
+            addLog("✓ Done! Check your inbox — the report is on its way.", "ok");
+        } else {
+            addLog("Relay rejected the request. See body above.", "err");
+        }
+
+    } catch (e) {
+        addLog("Network error: " + e.message, "err");
+        addLog("Make sure api_gateway.py is running and ngrok is up.", "err");
+    }
+
+    resetBtn();
+});
+</script>
+</body>
+</html>

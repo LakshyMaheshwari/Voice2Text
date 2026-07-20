@@ -4,7 +4,7 @@
 ╠══════════════════════════════════════════════════════════════════════════════╣
 ║                                                                            ║
 ║  A production-ready REST API for speech-to-text transcription.             ║
-║  Designed to be called by Activepieces, n8n, or any HTTP client.           ║
+║  Designed to be called by Relay.app, Activepieces, n8n, or any HTTP client.║
 ║                                                                            ║
 ║  SETUP                                                                     ║
 ║  ─────                                                                     ║
@@ -22,36 +22,39 @@
 ║  3. Run the server:                                                        ║
 ║     uvicorn whisper_api:app --host 0.0.0.0 --port 8001 --reload            ║
 ║                                                                            ║
-║  4. Test with curl:                                                        ║
+║  4. Test with curl (multipart):                                            ║
 ║     curl -X POST http://localhost:8001/transcribe -F "file=@test.mp3"      ║
 ║                                                                            ║
-║  5. Test URL download:                                                     ║
+║  5. Test with curl (raw binary):                                           ║
+║     curl -X POST http://localhost:8001/transcribe                          ║
+║          -H "Content-Type: audio/mpeg" --data-binary @test.mp3             ║
+║                                                                            ║
+║  6. Test URL download:                                                     ║
 ║     curl -X POST http://localhost:8001/transcribe                          ║
 ║          -H "Content-Type: application/json"                               ║
 ║          -d '{"url": "https://example.com/audio.mp3"}'                     ║
 ║                                                                            ║
-║  6. Health check:                                                          ║
+║  7. Health check:                                                          ║
 ║     curl http://localhost:8001/health                                      ║
 ║                                                                            ║
-║  INTEGRATION WITH ACTIVEPIECES                                             ║
-║  ────────────────────────────────                                           ║
-║  Use the "HTTP Request" piece:                                             ║
-║    Method:  POST                                                           ║
-║    URL:     http://<your-host>:8001/transcribe                             ║
-║    Body:    Form Data → field "file" → your audio file                     ║
-║    Result:  response.body.text → the transcribed text                      ║
+║  INTEGRATION WITH RELAY.APP                                                ║
+║  ──────────────────────────                                                 ║
+║  Step 3 "Call Speech-to-Text API":                                         ║
+║    Method:   POST                                                          ║
+║    URL:      http://<your-host>:8001/transcribe                            ║
+║    Encoding: Binary (raw file upload)   ← use this option                  ║
+║    Body:     ref → trigger.payload.file                                    ║
+║    Result:   response.body.text → the transcribed text                     ║
 ║                                                                            ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 
 import os
 import sys
-import io
 import time
 import tempfile
 import logging
 from pathlib import Path
-from typing import Optional
 
 # ─── Fix Windows terminal encoding ───────────────────────────────────────────
 try:
@@ -67,21 +70,43 @@ try:
 except ImportError:
     pass  # python-dotenv is optional
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 # ─── Configuration ───────────────────────────────────────────────────────────
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_MODEL   = os.getenv("WHISPER_MODEL",   "base")
+WHISPER_DEVICE  = os.getenv("WHISPER_DEVICE",  "cpu")
 WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "25"))
+MAX_FILE_SIZE_MB    = int(os.getenv("MAX_FILE_SIZE_MB", "25"))
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Supported audio extensions (all formats Whisper/ffmpeg can handle)
-SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".webm",
-                        ".wma", ".aac", ".mp4", ".mpeg", ".mpga", ".oga"}
+SUPPORTED_EXTENSIONS = {
+    ".mp3", ".wav", ".m4a", ".flac", ".ogg", ".webm",
+    ".wma", ".aac", ".mp4", ".mpeg", ".mpga", ".oga",
+}
+
+# MIME type → file extension map for raw binary uploads
+BINARY_EXT_MAP = {
+    "audio/mpeg":            ".mp3",
+    "audio/mp3":             ".mp3",
+    "audio/wav":             ".wav",
+    "audio/x-wav":           ".wav",
+    "audio/wave":            ".wav",
+    "audio/mp4":             ".m4a",
+    "audio/x-m4a":           ".m4a",
+    "audio/flac":            ".flac",
+    "audio/ogg":             ".ogg",
+    "audio/oga":             ".ogg",
+    "audio/webm":            ".webm",
+    "audio/aac":             ".aac",
+    "audio/x-aac":           ".aac",
+    "video/mp4":             ".mp4",
+    "video/webm":            ".webm",
+    "application/octet-stream": ".wav",  # safe default
+}
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -97,11 +122,11 @@ logger = logging.getLogger("whisper_api")
 # ══════════════════════════════════════════════════════════════════════════════
 app = FastAPI(
     title="Whisper Transcription API",
-    description="Speech-to-text transcription service powered by Whisper.",
-    version="1.0.0",
+    description="Speech-to-text transcription powered by Whisper. Accepts multipart, raw binary, or JSON URL.",
+    version="2.0.0",
 )
 
-# ─── CORS Middleware (allow all origins for Activepieces / frontend access) ──
+# ─── CORS Middleware ──────────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -112,7 +137,7 @@ app.add_middleware(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Model Loading (uses faster-whisper, matching your existing whisper_server.py)
+#  Model Loading
 # ══════════════════════════════════════════════════════════════════════════════
 model = None
 
@@ -123,17 +148,13 @@ def load_model():
     if model is not None:
         return
 
-    logger.info(f"Loading Whisper model='{WHISPER_MODEL}' device={WHISPER_DEVICE} compute={WHISPER_COMPUTE}...")
-
-    # ── Option A: faster-whisper (DEFAULT — matches your existing setup) ─────
+    logger.info(
+        f"Loading Whisper model='{WHISPER_MODEL}' "
+        f"device={WHISPER_DEVICE} compute={WHISPER_COMPUTE}..."
+    )
     from faster_whisper import WhisperModel
     model = WhisperModel(WHISPER_MODEL, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE)
-
-    # ── Option B: openai-whisper (uncomment to use the original OpenAI package)
-    # import whisper
-    # model = whisper.load_model(WHISPER_MODEL)
-
-    logger.info(f"✅ Whisper model loaded successfully!")
+    logger.info("✅ Whisper model loaded successfully!")
 
 
 @app.on_event("startup")
@@ -143,15 +164,9 @@ async def startup_event():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Pydantic Models for request/response
+#  Pydantic Models
 # ══════════════════════════════════════════════════════════════════════════════
-class URLRequest(BaseModel):
-    """Request body for URL-based transcription."""
-    url: str
-
-
 class TranscriptionResponse(BaseModel):
-    """Successful transcription response."""
     status: str = "success"
     text: str
     language: str
@@ -159,7 +174,6 @@ class TranscriptionResponse(BaseModel):
 
 
 class ErrorResponse(BaseModel):
-    """Error response."""
     status: str = "error"
     message: str
 
@@ -170,118 +184,71 @@ class ErrorResponse(BaseModel):
 
 def validate_file_extension(filename: str) -> bool:
     """Check if the file extension is a supported audio format."""
-    ext = Path(filename).suffix.lower()
-    return ext in SUPPORTED_EXTENSIONS
+    return Path(filename).suffix.lower() in SUPPORTED_EXTENSIONS
 
 
 def resample_audio_if_needed(file_path: str) -> str:
     """
     Resample audio to 16 kHz mono WAV if needed (e.g., Twilio sends 8 kHz).
-    faster-whisper and Whisper both expect 16 kHz input.
-    Uses pydub (requires ffmpeg installed on the system).
-
     Returns the path to the (possibly resampled) audio file.
     """
     try:
         from pydub import AudioSegment
-
         audio = AudioSegment.from_file(file_path)
-        sample_rate = audio.frame_rate
-
-        # Resample if not 16 kHz
-        if sample_rate != 16000:
-            logger.info(f"Resampling audio from {sample_rate} Hz → 16000 Hz")
+        if audio.frame_rate != 16000:
+            logger.info(f"Resampling audio from {audio.frame_rate} Hz → 16000 Hz")
             audio = audio.set_frame_rate(16000).set_channels(1)
             resampled_path = file_path + ".resampled.wav"
             audio.export(resampled_path, format="wav")
             return resampled_path
-
         return file_path
-
     except Exception as e:
-        # If pydub fails, let Whisper try to handle the original file.
-        # faster-whisper uses ffmpeg internally and can often handle it.
-        logger.warning(f"Resampling skipped (pydub error: {e}). Whisper will try the original file.")
+        logger.warning(f"Resampling skipped ({e}). Whisper will try the original file.")
         return file_path
 
 
 def transcribe_file(file_path: str) -> dict:
-    """
-    Run Whisper transcription on an audio file.
-    Returns a dict with text, language, and duration.
-    """
-
-    # ── Option A: faster-whisper (DEFAULT) ───────────────────────────────────
+    """Run Whisper transcription on an audio file."""
     segments_generator, info = model.transcribe(
         file_path,
-        beam_size=1,                        # Greedy decoding (fastest)
+        beam_size=1,
         condition_on_previous_text=False,
-        temperature=0.0,                    # Deterministic output
+        temperature=0.0,
     )
-
-    # Consume the generator to get all segments
     segments = list(segments_generator)
-
-    # Combine all segment texts into a single transcript
     full_text = " ".join(seg.text.strip() for seg in segments if seg.text.strip())
-
     return {
         "text": full_text,
         "language": info.language or "unknown",
         "duration_seconds": round(info.duration, 2),
     }
 
-    # ── Option B: openai-whisper (uncomment if using the original package) ───
-    # result = model.transcribe(file_path, fp16=False)
-    # return {
-    #     "text": result["text"].strip(),
-    #     "language": result.get("language", "unknown"),
-    #     "duration_seconds": round(
-    #         result["segments"][-1]["end"] if result.get("segments") else 0.0, 2
-    #     ),
-    # }
-
 
 def download_audio_from_url(url: str) -> str:
-    """
-    Download audio from a remote URL and save to a temp file.
-    Returns the path to the downloaded file.
-    """
+    """Download audio from a remote URL and save to a temp file."""
     import requests as req
+    from urllib.parse import urlparse
 
     logger.info(f"Downloading audio from URL: {url}")
-
     try:
         response = req.get(url, stream=True, timeout=30)
         response.raise_for_status()
     except req.exceptions.RequestException as e:
         raise HTTPException(status_code=400, detail=f"Failed to download audio from URL: {e}")
 
-    # Check Content-Length if available
     content_length = response.headers.get("Content-Length")
     if content_length and int(content_length) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
             status_code=400,
-            detail=f"Remote file exceeds maximum size of {MAX_FILE_SIZE_MB} MB."
+            detail=f"Remote file exceeds maximum size of {MAX_FILE_SIZE_MB} MB.",
         )
 
-    # Determine extension from URL or Content-Type
-    from urllib.parse import urlparse
     parsed = urlparse(url)
     ext = Path(parsed.path).suffix.lower()
     if ext not in SUPPORTED_EXTENSIONS:
-        # Try to guess from Content-Type
         content_type = response.headers.get("Content-Type", "")
-        type_map = {
-            "audio/mpeg": ".mp3", "audio/mp3": ".mp3",
-            "audio/wav": ".wav", "audio/x-wav": ".wav",
-            "audio/mp4": ".m4a", "audio/x-m4a": ".m4a",
-            "audio/flac": ".flac", "audio/ogg": ".ogg",
-            "audio/webm": ".webm",
-        }
-        ext = type_map.get(content_type.split(";")[0].strip(), ".wav")
+        ext = BINARY_EXT_MAP.get(content_type.split(";")[0].strip(), ".wav")
 
-    # Save to temp file
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
     total_bytes = 0
     for chunk in response.iter_content(chunk_size=8192):
@@ -291,59 +258,12 @@ def download_audio_from_url(url: str) -> str:
             os.unlink(tmp.name)
             raise HTTPException(
                 status_code=400,
-                detail=f"Remote file exceeds maximum size of {MAX_FILE_SIZE_MB} MB."
+                detail=f"Remote file exceeds maximum size of {MAX_FILE_SIZE_MB} MB.",
             )
         tmp.write(chunk)
     tmp.close()
-
     logger.info(f"Downloaded {total_bytes / 1024:.1f} KB → {tmp.name}")
     return tmp.name
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  Groq Whisper API Alternative (commented out — uncomment to use)
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# def transcribe_with_groq(file_path: str) -> dict:
-#     """
-#     Transcribe audio using Groq's FREE Whisper API.
-#     No GPU needed — runs on Groq's cloud infrastructure.
-#
-#     Setup:
-#       1. Get a free API key at https://console.groq.com
-#       2. Set GROQ_API_KEY in your .env file
-#
-#     This replaces the local Whisper model entirely.
-#     """
-#     import requests as req
-#
-#     api_key = os.getenv("GROQ_API_KEY")
-#     if not api_key:
-#         raise HTTPException(status_code=500, detail="GROQ_API_KEY not set in environment.")
-#
-#     url = "https://api.groq.com/openai/v1/audio/transcriptions"
-#     headers = {"Authorization": f"Bearer {api_key}"}
-#
-#     with open(file_path, "rb") as f:
-#         files = {"file": (Path(file_path).name, f, "audio/mpeg")}
-#         data = {
-#             "model": "whisper-large-v3",      # Groq's supported model
-#             "response_format": "verbose_json",  # Get language + duration
-#         }
-#         response = req.post(url, headers=headers, files=files, data=data, timeout=120)
-#
-#     if response.status_code != 200:
-#         raise HTTPException(
-#             status_code=500,
-#             detail=f"Groq API error ({response.status_code}): {response.text}"
-#         )
-#
-#     result = response.json()
-#     return {
-#         "text": result.get("text", "").strip(),
-#         "language": result.get("language", "unknown"),
-#         "duration_seconds": round(result.get("duration", 0.0), 2),
-#     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -352,7 +272,7 @@ def download_audio_from_url(url: str) -> str:
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint — use this to verify the server is running."""
+    """Health check endpoint."""
     return {
         "status": "ok",
         "model": WHISPER_MODEL,
@@ -365,113 +285,182 @@ async def health_check():
     "/transcribe",
     response_model=TranscriptionResponse,
     responses={
-        400: {"model": ErrorResponse, "description": "Bad request (missing file, unsupported format, etc.)"},
-        500: {"model": ErrorResponse, "description": "Internal server error (transcription failure)"},
+        400: {"model": ErrorResponse, "description": "Bad request"},
+        500: {"model": ErrorResponse, "description": "Internal server error"},
     },
-    summary="Transcribe an audio file to text",
+    summary="Transcribe audio to text",
     description=(
-        "Upload an audio file via multipart/form-data (field name: `file`), "
-        "or send a JSON body with a `url` field to download and transcribe remote audio."
+        "Accepts audio via three methods:\n"
+        "1. **Multipart form-data** — any field name, any Content-Type\n"
+        "2. **Raw binary body** — Content-Type: audio/mpeg, audio/wav, etc. (use for Relay.app Binary encoding)\n"
+        "3. **JSON body** — `{\"url\": \"https://...\"}`"
     ),
 )
-async def transcribe(
-    request: Request,
-    file: Optional[UploadFile] = File(None),
-):
+async def transcribe(request: Request):
     """
-    Main transcription endpoint.
-
-    Accepts either:
-      1. A file upload via multipart/form-data (field: "file")
-      2. A JSON body with {"url": "https://..."}
-
-    Returns JSON with the transcript text, detected language, and audio duration.
+    Main transcription endpoint. Tries input sources in this order:
+      1. multipart/form-data  (any field name)
+      2. raw binary body      (Content-Type: audio/*, video/*, application/octet-stream)
+      3. JSON body            ({"url": "https://..."})
     """
     tmp_path = None
     resampled_path = None
 
     try:
-        # ── Determine input source ───────────────────────────────────────────
-        if file and file.filename:
-            # ── FILE UPLOAD ──────────────────────────────────────────────────
-            logger.info(f"Received file upload: {file.filename} ({file.content_type})")
+        ct = request.headers.get("content-type", "").lower()
+        logger.info(f"POST /transcribe — Content-Type: '{ct}'")
+        
+        # ── DEBUG LOGGING FOR RELAY.APP WORKFLOW ─────────────────────────────
+        try:
+            with open("relay_debug.txt", "a", encoding="utf-8") as f:
+                f.write("=== INCOMING REQUEST ===\n")
+                f.write(f"Content-Type: {ct}\n")
+                for k, v in request.headers.items():
+                    f.write(f"Header: {k} = {v}\n")
+        except Exception:
+            pass
 
-            # Validate extension
-            if not validate_file_extension(file.filename):
-                ext = Path(file.filename).suffix.lower()
+        # ── 1. Multipart form-data (any field name) ───────────────────────────
+        tmp_path = None
+        if "multipart/form-data" in ct or "application/x-www-form-urlencoded" in ct:
+            try:
+                form = await request.form()
+
+                # ── Verbose per-field logging so we can see exactly what arrives ──
+                for key, value in form.items():
+                    if hasattr(value, "filename"):
+                        logger.info(
+                            f"  Form field '{key}': UploadFile "
+                            f"filename='{value.filename}' "
+                            f"content_type='{getattr(value, 'content_type', '?')}'"
+                        )
+                    else:
+                        # Log string values (may be a URL from Relay.app)
+                        preview = str(value)[:300]
+                        logger.info(f"  Form field '{key}': str = '{preview}'")
+
+                # ── Pass A: look for a proper file upload ─────────────────────
+                for key, value in form.items():
+                    if hasattr(value, "filename") and hasattr(value, "read") and value.filename:
+                        logger.info(f"File upload found in field='{key}' filename='{value.filename}'")
+
+                        if not validate_file_extension(value.filename):
+                            ext = Path(value.filename).suffix.lower()
+                            return JSONResponse(
+                                status_code=400,
+                                content={
+                                    "status": "error",
+                                    "message": (
+                                        f"Unsupported format '{ext}'. "
+                                        f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+                                    ),
+                                },
+                            )
+
+                        data = await value.read()
+                        if len(data) == 0:
+                            return JSONResponse(
+                                status_code=400,
+                                content={"status": "error", "message": "Uploaded file is empty."},
+                            )
+                        if len(data) > MAX_FILE_SIZE_BYTES:
+                            return JSONResponse(
+                                status_code=400,
+                                content={
+                                    "status": "error",
+                                    "message": f"File too large ({len(data)/1024/1024:.1f} MB). Max: {MAX_FILE_SIZE_MB} MB.",
+                                },
+                            )
+
+                        ext = Path(value.filename).suffix.lower()
+                        tf = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+                        tf.write(data)
+                        tf.close()
+                        tmp_path = tf.name
+                        break
+
+                # ── Pass B: Relay.app sends file as a URL string in the form ──
+                if tmp_path is None:
+                    for key, value in form.items():
+                        if isinstance(value, str) and value.startswith("http"):
+                            logger.info(f"URL string found in form field='{key}': {value[:200]}")
+                            tmp_path = download_audio_from_url(value)
+                            break
+
+            except Exception as form_err:
+                logger.warning(f"Form parse error: {form_err}")
+
+        # ── 2. Raw binary body (Relay.app "Binary" encoding) ──────────────────
+        if tmp_path is None and any(
+            ct.split(";")[0].strip().startswith(p)
+            for p in ("audio/", "video/", "application/octet-stream")
+        ):
+            mime = ct.split(";")[0].strip()
+            ext = BINARY_EXT_MAP.get(mime, ".wav")
+            raw = await request.body()
+            logger.info(f"Raw binary body: mime='{mime}' size={len(raw)} bytes → ext='{ext}'")
+
+            if len(raw) == 0:
+                return JSONResponse(
+                    status_code=400,
+                    content={"status": "error", "message": "Raw binary body is empty."},
+                )
+            if len(raw) > MAX_FILE_SIZE_BYTES:
                 return JSONResponse(
                     status_code=400,
                     content={
                         "status": "error",
-                        "message": (
-                            f"Unsupported file format: '{ext}'. "
-                            f"Supported formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
-                        ),
+                        "message": f"File too large ({len(raw)/1024/1024:.1f} MB). Max: {MAX_FILE_SIZE_MB} MB.",
                     },
                 )
 
-            # Read file content and check size
-            content = await file.read()
-            if len(content) > MAX_FILE_SIZE_BYTES:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "status": "error",
-                        "message": f"File too large ({len(content) / 1024 / 1024:.1f} MB). Maximum size is {MAX_FILE_SIZE_MB} MB.",
-                    },
-                )
+            tf = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            tf.write(raw)
+            tf.close()
+            tmp_path = tf.name
 
-            if len(content) == 0:
-                return JSONResponse(
-                    status_code=400,
-                    content={"status": "error", "message": "Uploaded file is empty."},
-                )
-
-            # Save to temp file
-            ext = Path(file.filename).suffix.lower()
-            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
-            tmp_file.write(content)
-            tmp_file.close()
-            tmp_path = tmp_file.name
-
-        else:
-            # ── URL DOWNLOAD (JSON body) ─────────────────────────────────────
+        # ── 3. JSON body with {"url": "..."} ──────────────────────────────────
+        if tmp_path is None:
+            url = None
             try:
                 body = await request.json()
-                url = body.get("url")
+                if isinstance(body, dict):
+                    url = body.get("url")
             except Exception:
-                url = None
+                pass
 
             if not url:
                 return JSONResponse(
                     status_code=400,
                     content={
                         "status": "error",
-                        "message": "No audio file provided. Send a file via multipart/form-data (field: 'file') or a JSON body with {'url': '...'}.",
+                        "message": (
+                            "No audio file received. Send audio via:\n"
+                            "  1. multipart/form-data (any field name)\n"
+                            "  2. Raw binary body (Content-Type: audio/mpeg, audio/wav, etc.)\n"
+                            "  3. JSON body: {\"url\": \"https://...\"}\n\n"
+                            f"Received Content-Type was: '{ct}'"
+                        ),
                     },
                 )
 
             tmp_path = download_audio_from_url(url)
 
-        # ── Resample if needed (e.g., 8 kHz Twilio audio → 16 kHz) ──────────
+        # ── Resample if needed ────────────────────────────────────────────────
         resampled_path = resample_audio_if_needed(tmp_path)
         audio_path = resampled_path
 
-        # ── Transcribe ───────────────────────────────────────────────────────
+        # ── Transcribe ────────────────────────────────────────────────────────
         logger.info(f"Starting transcription: {audio_path}")
         start_time = time.time()
-
         result = transcribe_file(audio_path)
-
-        # ── To use Groq instead, uncomment the line below and comment out the line above:
-        # result = transcribe_with_groq(audio_path)
-
         elapsed = time.time() - start_time
+
         logger.info(
-            f"✅ Transcription complete in {elapsed:.2f}s | "
-            f"Language: {result['language']} | "
-            f"Duration: {result['duration_seconds']}s | "
-            f"Text length: {len(result['text'])} chars"
+            f"✅ Done in {elapsed:.2f}s | "
+            f"lang={result['language']} | "
+            f"dur={result['duration_seconds']}s | "
+            f"chars={len(result['text'])}"
         )
 
         return {
@@ -482,22 +471,16 @@ async def transcribe(
         }
 
     except HTTPException:
-        # Re-raise FastAPI HTTP exceptions as-is
         raise
 
     except Exception as e:
-        # Catch-all for unexpected errors (corrupted audio, model failures, etc.)
         logger.error(f"❌ Transcription failed: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={
-                "status": "error",
-                "message": f"Transcription failed: {str(e)}",
-            },
+            content={"status": "error", "message": f"Transcription failed: {str(e)}"},
         )
 
     finally:
-        # ── Cleanup temp files ───────────────────────────────────────────────
         for path in [tmp_path, resampled_path]:
             if path and os.path.exists(path):
                 try:
@@ -512,7 +495,6 @@ async def transcribe(
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Return consistent JSON error responses for all HTTP exceptions."""
     return JSONResponse(
         status_code=exc.status_code,
         content={"status": "error", "message": exc.detail},
@@ -521,7 +503,6 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    """Catch-all handler for unhandled exceptions."""
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
@@ -553,21 +534,17 @@ if __name__ == "__main__":
 #  Health check:
 #    curl http://localhost:8001/health
 #
-#  Transcribe a local file:
+#  Multipart (any field name):
 #    curl -X POST http://localhost:8001/transcribe -F "file=@test.mp3"
+#    curl -X POST http://localhost:8001/transcribe -F "audio=@test.wav"
 #
-#  Transcribe from URL:
+#  Raw binary (Relay.app Binary encoding):
+#    curl -X POST http://localhost:8001/transcribe \
+#         -H "Content-Type: audio/mpeg" --data-binary @test.mp3
+#
+#  URL download:
 #    curl -X POST http://localhost:8001/transcribe \
 #         -H "Content-Type: application/json" \
-#         -d "{\"url\": \"https://example.com/audio.mp3\"}"
-#
-#  PowerShell (file upload):
-#    Invoke-RestMethod -Uri http://localhost:8001/transcribe `
-#      -Method Post -Form @{ file = Get-Item "test.mp3" }
-#
-#  PowerShell (URL download):
-#    Invoke-RestMethod -Uri http://localhost:8001/transcribe `
-#      -Method Post -ContentType "application/json" `
-#      -Body '{"url":"https://example.com/audio.mp3"}'
+#         -d '{"url": "https://example.com/audio.mp3"}'
 #
 # ══════════════════════════════════════════════════════════════════════════════
